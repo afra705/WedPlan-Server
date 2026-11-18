@@ -9,10 +9,15 @@ const port = 5000;
 
 // middleware
 app.use(express.json());
-app.use(cors());
+app.use(
+  cors({
+    origin: "http://localhost:3000",
+    credentials: true,
+  })
+);
 
 // mongodb
-const client = new MongoClient(process.env.MONGODB_URI);
+const client = new MongoClient(process.env.MONGODB_URL);
 
 export async function connectToMongoDB() {
   await client.connect();
@@ -22,7 +27,7 @@ export async function connectToMongoDB() {
 
 const connectedClient = await connectToMongoDB();
 
-const database = connectedClient.db('car-wash');
+const database = connectedClient.db('wedplan');
 
 // collections
 const users = database.collection('users');
@@ -37,36 +42,25 @@ app.get('/', (req, res) => {
 });
 
 
-
-// POST: Add new service
+// service
 app.post('/services', async (req, res) => {
   try {
-    const serviceData = req.body;
-
-    const newService = {
-      serviceName: serviceData.serviceName,
-      category: serviceData.category,
-      description: serviceData.description,
-      price: Number(serviceData.price),
-      location: serviceData.location,
-
+    const serviceData = {
+      ...req.body,
       status: "pending",
       createdAt: new Date(),
     };
 
-    const result = await services.insertOne(newService);
+    const result = await services.insertOne(serviceData);
 
-    res.status(201).send({
-      success: true,
+    res.send({
       message: "Service added successfully",
       insertedId: result.insertedId,
     });
 
   } catch (error) {
     res.status(500).send({
-      success: false,
       message: "Failed to add service",
-      error: error.message,
     });
   }
 });
@@ -123,83 +117,87 @@ app.get('/services/:id', async (req, res) => {
 });
 
 
-// PATCH: Update service
-// app.patch('/services/:id', async (req, res) => {
-//   try {
-//     const id = req.params.id;
+// PATCH: Update Service
+app.patch('/services/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
 
-//     if (!ObjectId.isValid(id)) {
-//       return res.status(400).send({
-//         message: "Invalid service ID",
-//       });
-//     }
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid service ID",
+      });
+    }
 
-//     const updatedData = req.body;
+    const { serviceName, category, description, price, location, image } = req.body;
 
-//     const result = await services.updateOne(
-//       { _id: new ObjectId(id) },
-//       {
-//         $set: {
-//           ...updatedData,
-//           updatedAt: new Date(),
-//         },
-//       }
-//     );
+    const result = await services.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          serviceName,
+          category,
+          description,
+          price: Number(price),
+          location,
+          image,
+          updatedAt: new Date(),
+        },
+      }
+    );
 
-//     if (result.matchedCount === 0) {
-//       return res.status(404).send({
-//         message: "Service not found",
-//       });
-//     }
+    if (result.matchedCount === 0) {
+      return res.status(404).send({
+        message: "Service not found",
+      });
+    }
 
-//     res.send({
-//       success: true,
-//       message: "Service updated successfully",
-//     });
+    res.send({
+      success: true,
+      message: "Service updated successfully",
+    });
 
-//   } catch (error) {
-//     res.status(500).send({
-//       message: "Failed to update service",
-//       error: error.message,
-//     });
-//   }
-// });
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({
+      message: "Failed to update service",
+    });
+  }
+});
 
 
-// DELETE: Delete service
-// app.delete('/services/:id', async (req, res) => {
-//   try {
-//     const id = req.params.id;
+// DELETE: Delete Service
+app.delete('/services/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
 
-//     if (!ObjectId.isValid(id)) {
-//       return res.status(400).send({
-//         message: "Invalid service ID",
-//       });
-//     }
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid service ID",
+      });
+    }
 
-//     const result = await services.deleteOne({
-//       _id: new ObjectId(id),
-//     });
+    const result = await services.deleteOne({
+      _id: new ObjectId(id),
+    });
 
-//     if (result.deletedCount === 0) {
-//       return res.status(404).send({
-//         message: "Service not found",
-//       });
-//     }
+    if (result.deletedCount === 0) {
+      return res.status(404).send({
+        message: "Service not found",
+      });
+    }
 
-//     res.send({
-//       success: true,
-//       message: "Service deleted successfully",
-//     });
+    res.send({
+      success: true,
+      message: "Service deleted successfully",
+    });
 
-//   } catch (error) {
-//     res.status(500).send({
-//       message: "Failed to delete service",
-//       error: error.message,
-//     });
-//   }
-// });
-
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({
+      message: "Failed to delete service",
+    });
+  }
+});
 
 // server
 app.listen(port, () => {
