@@ -228,6 +228,41 @@ app.get('/users/stats', async (req, res) => {
   }
 });
 
+// Update service status
+app.patch("/services/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const allowedStatuses = ["pending", "approved", "rejected"];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).send({ message: "Invalid service status" });
+    }
+
+    const result = await services.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          status,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({ message: "Service not found" });
+    }
+
+    res.send({
+      success: true,
+      message: `Service ${status} successfully`,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to update service status" });
+  }
+});
 
 // server
 app.listen(port, () => {
