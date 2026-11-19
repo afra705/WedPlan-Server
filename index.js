@@ -265,26 +265,80 @@ app.patch("/services/:id/status", async (req, res) => {
 });
 
 // bookings
+
+
 app.post("/bookings", async (req, res) => {
   try {
+    const {
+      serviceId,
+      vendorId,
+      customerId,
+      eventDate,
+      eventLocation,
+      message,
+    } = req.body;
+
+    // Find service
+    const service = await services.findOne({
+      _id: new ObjectId(serviceId),
+    });
+
+    if (!service) {
+      return res.status(404).send({
+        message: "Service not found!",
+      });
+    }
+
+    // Prevent own service booking
+    if (service.vendorEmail?.toLowerCase() === customerId.toLowerCase()) {
+      return res.status(400).send({
+        message: "You cannot book your own service!",
+      });
+    }
+
+    // Check if service is already booked on this date
+    const existingBooking = await bookings.findOne({
+      serviceId,
+      eventDate,
+      status: { $in: ["pending", "accepted"] },
+    });
+
+if (existingBooking) {
+  return res.status(400).send({
+    success: false,
+  });
+}
+
+    // Create booking
     const bookingData = {
-      ...req.body,
+      serviceId,
+      vendorId,
+      customerId,
+      eventDate,
+      eventLocation,
+      message,
       status: "pending",
       createdAt: new Date(),
     };
 
     const result = await bookings.insertOne(bookingData);
 
-    res.status(201).send({
+    res.send({
       success: true,
+      message: "Booking request submitted successfully!",
       insertedId: result.insertedId,
     });
+
   } catch (error) {
+    console.log(error);
+
     res.status(500).send({
-      message: "Failed to create booking",
+      message: "Failed to create booking!",
     });
   }
 });
+
+
 
 app.get("/my-bookings/:customerId", async (req, res) => {
   try {
