@@ -40,6 +40,34 @@ const payments = database.collection('payments');
 app.get('/', (req, res) => {
   res.send('Hello World!');
 });
+// Get Total Vendors and Customers
+
+app.get('/users/stats', async (req, res) => {
+  try {
+    const totalVendors = await users.countDocuments({
+      role: "vendor",
+    });
+
+    const totalCustomers = await users.countDocuments({
+      role: "customer",
+    });
+
+    console.log("Total Vendors:", totalVendors);
+    console.log("Total Customers:", totalCustomers);
+
+    res.status(200).send({
+      totalVendors,
+      totalCustomers,
+    });
+
+  } catch (error) {
+    console.log("User stats error:", error);
+
+    res.status(500).send({
+      message: "Failed to get user statistics",
+    });
+  }
+});
 
 
 // service
@@ -199,34 +227,6 @@ app.delete('/services/:id', async (req, res) => {
   }
 });
 // 
-// Get Total Vendors and Customers
-
-app.get('/users/stats', async (req, res) => {
-  try {
-    const totalVendors = await users.countDocuments({
-      role: "vendor",
-    });
-
-    const totalCustomers = await users.countDocuments({
-      role: "customer",
-    });
-
-    console.log("Total Vendors:", totalVendors);
-    console.log("Total Customers:", totalCustomers);
-
-    res.status(200).send({
-      totalVendors,
-      totalCustomers,
-    });
-
-  } catch (error) {
-    console.log("User stats error:", error);
-
-    res.status(500).send({
-      message: "Failed to get user statistics",
-    });
-  }
-});
 
 // Update service status
 app.patch("/services/:id/status", async (req, res) => {
@@ -263,6 +263,96 @@ app.patch("/services/:id/status", async (req, res) => {
     res.status(500).send({ message: "Failed to update service status" });
   }
 });
+
+// bookings
+app.post("/bookings", async (req, res) => {
+  try {
+    const bookingData = {
+      ...req.body,
+      status: "pending",
+      createdAt: new Date(),
+    };
+
+    const result = await bookings.insertOne(bookingData);
+
+    res.status(201).send({
+      success: true,
+      insertedId: result.insertedId,
+    });
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to create booking",
+    });
+  }
+});
+
+app.get("/my-bookings/:customerId", async (req, res) => {
+  try {
+    const customerId = req.params.customerId;
+
+    const result = await bookings
+      .find({ customerId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const bookingsWithService = await Promise.all(
+      result.map(async (booking) => {
+        const service = await services.findOne({
+          _id: new ObjectId(booking.serviceId),
+        });
+
+        return {
+          ...booking,
+          service,
+        };
+      })
+    );
+
+    res.send(bookingsWithService);
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to fetch bookings",
+    });
+  }
+});
+
+app.patch("/bookings/:id/cancel", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { customerId } = req.body;
+
+    const result = await bookings.updateOne(
+      {
+        _id: new ObjectId(id),
+        customerId: customerId,
+        status: "pending",
+      },
+      {
+        $set: {
+          status: "cancelled",
+        },
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(400).send({
+        message: "Booking cannot be cancelled",
+      });
+    }
+
+    res.send({
+      success: true,
+      message: "Booking cancelled successfully",
+    });
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to cancel booking",
+    });
+  }
+});
+
+
+
 
 // server
 app.listen(port, () => {
