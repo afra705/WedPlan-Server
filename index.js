@@ -95,15 +95,55 @@ app.post('/services', async (req, res) => {
 
 
 // GET: Get all services
-app.get('/services', async (req, res) => {
+// GET: Get all services with search and filters
+app.get("/services", async (req, res) => {
   try {
+    const { search, category, location } = req.query;
+
+    // Filter object
+    const filter = {};
+
+    // Search by service name or vendor name
+    if (search) {
+      filter.$or = [
+        {
+          serviceName: {
+            $regex: search,
+            $options: "i",
+          },
+        },
+        {
+          vendorName: {
+            $regex: search,
+            $options: "i",
+          },
+        },
+      ];
+    }
+
+    // Filter by category
+if (category && category !== "all") {
+  filter.category = {
+    $regex: `^${category.trim()}$`,
+    $options: "i",
+  };
+}
+
+    // Filter by location
+    if (location && location !== "all") {
+      filter.location = {
+        $regex: location,
+        $options: "i",
+      };
+    }
+
+    // Get filtered services
     const result = await services
-      .find()
+      .find(filter)
       .sort({ createdAt: -1 })
       .toArray();
 
     res.send(result);
-
   } catch (error) {
     res.status(500).send({
       message: "Failed to get services",
@@ -405,6 +445,91 @@ app.patch("/bookings/:id/cancel", async (req, res) => {
   }
 });
 
+// vendor apis
+// Get booking requests for a vendor
+app.get("/vendor-booking-requests/:vendorId", async (req, res) => {
+  try {
+    const vendorId = req.params.vendorId;
+
+    const bookings = await database
+      .collection("bookings")
+      .find({ vendorId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // Get service information for each booking
+    const bookingsWithService = await Promise.all(
+      bookings.map(async (booking) => {
+        const service = await database
+          .collection("services")
+          .findOne({
+            _id: new ObjectId(booking.serviceId),
+          });
+
+        return {
+          ...booking,
+          service: service
+            ? {
+                serviceName: service.serviceName,
+                image: service.image,
+                vendorName: service.vendorName,
+              }
+            : null,
+        };
+      })
+    );
+
+    res.send(bookingsWithService);
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to get booking requests",
+    });
+  }
+});
+
+
+// Accept or Reject booking
+app.patch("/bookings/:id/status", async (req, res) => {
+  try {
+    const { vendorId, status } = req.body;
+    const bookingId = req.params.id;
+
+    // Only accept or reject
+    if (!["accepted", "rejected"].includes(status)) {
+      return res.status(400).send({
+        message: "Invalid booking status",
+      });
+    }
+
+    const result = await database
+      .collection("bookings")
+      .updateOne(
+        {
+          _id: new ObjectId(bookingId),
+          vendorId: vendorId,
+          status: "pending",
+        },
+        {
+          $set: { status: status },
+        }
+      );
+
+    if (result.matchedCount === 0) {
+      return res.status(400).send({
+        message:
+          "Booking not found, already processed, or unauthorized",
+      });
+    }
+
+    res.send({
+      message: `Booking ${status} successfully`,
+    });
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to update booking",
+    });
+  }
+});
 
 
 
