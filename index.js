@@ -94,60 +94,60 @@ app.post('/services', async (req, res) => {
 });
 
 
-// GET: Get all services
 // GET: Get all services with search and filters
+// GET: Get all services with backend search and filters
 app.get("/services", async (req, res) => {
   try {
-    const { search, category, location } = req.query;
+    const { search, category, location, status } = req.query;
 
-    // Filter object
     const filter = {};
 
-    // Search by service name or vendor name
-    if (search) {
+    // Search by service name, vendor name or vendor email
+    if (search && typeof search === "string") {
+      const searchRegex = {
+        $regex: search.trim(),
+        $options: "i",
+      };
+
       filter.$or = [
-        {
-          serviceName: {
-            $regex: search,
-            $options: "i",
-          },
-        },
-        {
-          vendorName: {
-            $regex: search,
-            $options: "i",
-          },
-        },
+        { serviceName: searchRegex },
+        { vendorName: searchRegex },
+        { vendorEmail: searchRegex },
       ];
     }
 
     // Filter by category
-if (category && category !== "all") {
-  filter.category = {
-    $regex: `^${category.trim()}$`,
-    $options: "i",
-  };
-}
-
-    // Filter by location
-    if (location && location !== "all") {
-      filter.location = {
-        $regex: location,
+    if (category && category !== "all") {
+      filter.category = {
+        $regex: `^${category.trim()}$`,
         $options: "i",
       };
     }
 
-    // Get filtered services
+    // Filter by status
+    if (status && status !== "all") {
+      filter.status = status;
+    }
+
+    // Filter by location (for Browse Services)
+    if (location && location !== "all") {
+      filter.location = {
+        $regex: location.trim(),
+        $options: "i",
+      };
+    }
+
     const result = await services
       .find(filter)
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.send(result);
+    res.status(200).send(result);
   } catch (error) {
+    console.error("Get services error:", error);
+
     res.status(500).send({
       message: "Failed to get services",
-      error: error.message,
     });
   }
 });
