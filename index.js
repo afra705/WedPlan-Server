@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
 import { MongoClient, ObjectId } from 'mongodb';
-
+import { stripe } from './config/stripe.js';
 const app = express();
 const port = 5000;
 
@@ -33,6 +33,7 @@ const database = connectedClient.db('wedplan');
 const users = database.collection('user');
 const services = database.collection('services');
 const bookings = database.collection('bookings');
+const transactions = database.collection('transactions');
 const payments = database.collection('payments');
 
 // all apis
@@ -94,11 +95,11 @@ app.post('/services', async (req, res) => {
 });
 
 
-// GET: Get all services with search and filters
 // GET: Get all services with backend search and filters
+
 app.get("/services", async (req, res) => {
   try {
-    const { search, category, location, status } = req.query;
+    const { search, category, location, status, sort } = req.query;
 
     const filter = {};
 
@@ -129,7 +130,7 @@ app.get("/services", async (req, res) => {
       filter.status = status;
     }
 
-    // Filter by location (for Browse Services)
+    // Filter by location
     if (location && location !== "all") {
       filter.location = {
         $regex: location.trim(),
@@ -137,9 +138,18 @@ app.get("/services", async (req, res) => {
       };
     }
 
+    // Sort by price
+    const sortOrder =
+  sort === "low-to-high" ? 1 :
+  sort === "high-to-low" ? -1 : null;
+
     const result = await services
       .find(filter)
-      .sort({ createdAt: -1 })
+      .sort(
+        sortOrder !== null
+          ? { price: sortOrder }
+          : { createdAt: -1 }
+      )
       .toArray();
 
     res.status(200).send(result);
@@ -151,6 +161,7 @@ app.get("/services", async (req, res) => {
     });
   }
 });
+
 
 
 // GET: Get single service by ID
@@ -530,6 +541,168 @@ app.patch("/bookings/:id/status", async (req, res) => {
     });
   }
 });
+
+// user block / unblock apis
+
+app.patch("/users/:id/block", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const isBlocked = req.body.isBlocked;
+
+    // Check if isBlocked is a boolean
+    if (typeof isBlocked !== "boolean") {
+      return res.status(400).send({
+        message: "Invalid user status",
+      });
+    }
+
+    // Find user
+    const user = await users.findOne({ id: id });
+
+    if (!user) {
+      return res.status(404).send({
+        message: "User not found",
+      });
+    }
+
+    // Admin cannot be blocked
+    if (user.role === "admin") {
+      return res.status(403).send({
+        message: "Admin cannot be blocked",
+      });
+    }
+
+    // Update user status
+    await users.updateOne(
+      { id: id },
+      {
+        $set: {
+          isBlocked: isBlocked,
+        },
+      }
+    );
+
+    res.send({
+      success: true,
+      message: isBlocked
+        ? "User blocked successfully"
+        : "User unblocked successfully",
+    });
+
+  } catch (error) {
+    console.log(error);
+
+    res.status(500).send({
+      message: "Failed to update user status",
+    });
+  }
+});
+
+// transactions
+
+app.post("/create-checkout-session", async (req, res) => {
+  try {
+    // Temporary testing only. JWT authentication will be added later.
+    const { vendorId } = req.body;
+
+    // Validate vendor ID
+    if (!vendorId) {
+      return res.status(400).send({
+        success: false,
+        message: "Vendor ID is required",
+      });
+    }
+
+    // Find vendor
+ const vendor = await users.findOne({
+  _id: new ObjectId(vendorId),
+  role: "vendor",
+});
+
+    if (!vendor) {
+      return res.status(404).send({
+        success: false,
+        message: "Vendor not found",
+      });
+    }
+
+    // Prevent duplicate subscription
+    if (vendor.subscriptionPlan === "premium") {
+      return res.status(400).send({
+        success: false,
+        message: "You already have a Premium subscription",
+      });
+    }
+
+    // Get Stripe Price
+    const price = await stripe.prices.retrieve(
+      process.env.STRIPE_PRICE_ID
+    );
+
+    if (!price.active || price.unit_amount === null) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid or inactive Stripe price",
+      });
+    }
+
+    // Create Stripe Checkout Session
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+
+      line_items: [
+        {
+          price: process.env.STRIPE_PRICE_ID,
+          quantity: 1,
+        },
+      ],
+
+      metadata: {
+        vendorId,
+        plan: "premium",
+      },
+
+      subscription_data: {
+        metadata: {
+          vendorId,
+          plan: "premium",
+        },
+      },
+
+      success_url: `${process.env.CLIENT_URL}/vendor/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
+
+      cancel_url: `${process.env.CLIENT_URL}/vendor/subscription/cancel`,
+    });
+
+    // Save pending transaction
+    await transactions.insertOne({
+      vendorId,
+      plan: "premium",
+      amount: price.unit_amount / 100,
+      currency: price.currency,
+      stripeSessionId: session.id,
+      stripeSubscriptionId: null,
+      status: "pending",
+      createdAt: new Date(),
+    });
+
+    // Send Checkout URL
+    res.send({
+      success: true,
+      url: session.url,
+    });
+
+  } catch (error) {
+    console.error("Stripe Checkout Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to create checkout session",
+    });
+  }
+});
+
+
 
 
 
