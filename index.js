@@ -1,49 +1,134 @@
 
-import express from 'express';
-import cors from 'cors';
-import 'dotenv/config';
-import { MongoClient, ObjectId } from 'mongodb';
-import { stripe } from './config/stripe.js';
-const app = express();
-const port = 5000;
+import express from "express";
+import cors from "cors";
+import "dotenv/config";
+import { MongoClient, ObjectId } from "mongodb";
+import { stripe } from "./config/stripe.js";
 
-// middleware
-app.use(express.json());
+const app = express();
+const port = process.env.PORT || 5000;
+
+// ========================================
+// 1. CORS MIDDLEWARE
+// ========================================
+
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: [
+      "http://localhost:3000",
+      process.env.CLIENT_URL,
+    ].filter(Boolean),
     credentials: true,
   })
 );
 
-// mongodb
+// ========================================
+// 2. MONGODB CONNECTION
+// ========================================
+
 const client = new MongoClient(process.env.MONGODB_URL);
 
 export async function connectToMongoDB() {
   await client.connect();
+
   console.log("You successfully connected to MongoDB!");
+
   return client;
 }
 
 const connectedClient = await connectToMongoDB();
 
-const database = connectedClient.db('wedplan');
+const database = connectedClient.db("wedplan");
 
-// collections
-const users = database.collection('user');
-const services = database.collection('services');
-const bookings = database.collection('bookings');
-const transactions = database.collection('transactions');
-const payments = database.collection('payments');
+// Collections
+const users = database.collection("user");
+const services = database.collection("services");
+const bookings = database.collection("bookings");
+const transactions = database.collection("transactions");
+const payments = database.collection("payments");
 
-// all apis
+// ========================================
+// 3. STRIPE WEBHOOK
+// IMPORTANT: Must be BEFORE express.json()
+// ========================================
 
-app.get('/', (req, res) => {
-  res.send('Hello World!');
+app.post(
+  "/stripe-webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    const signature = req.headers["stripe-signature"];
+
+    let event;
+
+    // Verify Stripe webhook signature
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        signature,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
+    } catch (error) {
+      console.error("Webhook signature error:", error.message);
+
+      return res.status(400).send(
+        `Webhook Error: ${error.message}`
+      );
+    }
+
+    // Checkout completed successfully
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+
+      try {
+        const result = await transactions.updateOne(
+          {
+            stripeSessionId: session.id,
+          },
+          {
+            $set: {
+              status: "paid",
+              stripeSubscriptionId: session.subscription ?? null,
+            },
+          }
+        );
+
+        console.log("Payment successful:", session.id);
+        console.log("Updated transactions:", result.modifiedCount);
+      } catch (error) {
+        console.error("Transaction update error:", error);
+
+        return res.status(500).send(
+          "Failed to update transaction"
+        );
+      }
+    }
+
+    res.status(200).send({
+      received: true,
+    });
+  }
+);
+
+// ========================================
+// 4. NORMAL JSON MIDDLEWARE
+// All normal API routes come after this
+// ========================================
+
+app.use(express.json());
+
+// ========================================
+// 5. HOME API
+// ========================================
+
+app.get("/", (req, res) => {
+  res.send("Hello World!");
 });
-// Get Total Vendors and Customers
 
-app.get('/users/stats', async (req, res) => {
+// ========================================
+// 6. USER STATISTICS
+// ========================================
+
+app.get("/users/stats", async (req, res) => {
   try {
     const totalVendors = await users.countDocuments({
       role: "vendor",
@@ -53,16 +138,12 @@ app.get('/users/stats', async (req, res) => {
       role: "customer",
     });
 
-    console.log("Total Vendors:", totalVendors);
-    console.log("Total Customers:", totalCustomers);
-
     res.status(200).send({
       totalVendors,
       totalCustomers,
     });
-
   } catch (error) {
-    console.log("User stats error:", error);
+    console.error("User stats error:", error);
 
     res.status(500).send({
       message: "Failed to get user statistics",
@@ -70,9 +151,13 @@ app.get('/users/stats', async (req, res) => {
   }
 });
 
+// ========================================
+// 7. SERVICES APIs
+// ========================================
 
-// service
-app.post('/services', async (req, res) => {
+// POST: Add a service
+
+app.post("/services", async (req, res) => {
   try {
     const serviceData = {
       ...req.body,
@@ -82,28 +167,35 @@ app.post('/services', async (req, res) => {
 
     const result = await services.insertOne(serviceData);
 
-    res.send({
+    res.status(201).send({
+      success: true,
       message: "Service added successfully",
       insertedId: result.insertedId,
     });
-
   } catch (error) {
+    console.error("Add service error:", error);
+
     res.status(500).send({
       message: "Failed to add service",
     });
   }
 });
 
-
-// GET: Get all services with backend search and filters
+// GET: Get all services with search and filters
 
 app.get("/services", async (req, res) => {
   try {
-    const { search, category, location, status, sort } = req.query;
+    const {
+      search,
+      category,
+      location,
+      status,
+      sort,
+    } = req.query;
 
     const filter = {};
 
-    // Search by service name, vendor name or vendor email
+    // Search by service name, vendor name or email
     if (search && typeof search === "string") {
       const searchRegex = {
         $regex: search.trim(),
@@ -117,7 +209,7 @@ app.get("/services", async (req, res) => {
       ];
     }
 
-    // Filter by category
+    // Category filter
     if (category && category !== "all") {
       filter.category = {
         $regex: `^${category.trim()}$`,
@@ -125,12 +217,12 @@ app.get("/services", async (req, res) => {
       };
     }
 
-    // Filter by status
+    // Status filter
     if (status && status !== "all") {
       filter.status = status;
     }
 
-    // Filter by location
+    // Location filter
     if (location && location !== "all") {
       filter.location = {
         $regex: location.trim(),
@@ -138,10 +230,13 @@ app.get("/services", async (req, res) => {
       };
     }
 
-    // Sort by price
+    // Price sorting
     const sortOrder =
-  sort === "low-to-high" ? 1 :
-  sort === "high-to-low" ? -1 : null;
+      sort === "low-to-high"
+        ? 1
+        : sort === "high-to-low"
+          ? -1
+          : null;
 
     const result = await services
       .find(filter)
@@ -162,12 +257,11 @@ app.get("/services", async (req, res) => {
   }
 });
 
-
-
 // GET: Get single service by ID
-app.get('/services/:id', async (req, res) => {
+
+app.get("/services/:id", async (req, res) => {
   try {
-    const id = req.params.id;
+    const { id } = req.params;
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).send({
@@ -185,21 +279,21 @@ app.get('/services/:id', async (req, res) => {
       });
     }
 
-    res.send(result);
-
+    res.status(200).send(result);
   } catch (error) {
+    console.error("Get single service error:", error);
+
     res.status(500).send({
       message: "Failed to get service",
-      error: error.message,
     });
   }
 });
 
+// PATCH: Update service
 
-// PATCH: Update Service
-app.patch('/services/:id', async (req, res) => {
+app.patch("/services/:id", async (req, res) => {
   try {
-    const id = req.params.id;
+    const { id } = req.params;
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).send({
@@ -207,10 +301,19 @@ app.patch('/services/:id', async (req, res) => {
       });
     }
 
-    const { serviceName, category, description, price, location, image } = req.body;
+    const {
+      serviceName,
+      category,
+      description,
+      price,
+      location,
+      image,
+    } = req.body;
 
     const result = await services.updateOne(
-      { _id: new ObjectId(id) },
+      {
+        _id: new ObjectId(id),
+      },
       {
         $set: {
           serviceName,
@@ -234,20 +337,20 @@ app.patch('/services/:id', async (req, res) => {
       success: true,
       message: "Service updated successfully",
     });
-
   } catch (error) {
-    console.log(error);
+    console.error("Update service error:", error);
+
     res.status(500).send({
       message: "Failed to update service",
     });
   }
 });
 
+// DELETE: Delete service
 
-// DELETE: Delete Service
-app.delete('/services/:id', async (req, res) => {
+app.delete("/services/:id", async (req, res) => {
   try {
-    const id = req.params.id;
+    const { id } = req.params;
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).send({
@@ -269,30 +372,44 @@ app.delete('/services/:id', async (req, res) => {
       success: true,
       message: "Service deleted successfully",
     });
-
   } catch (error) {
-    console.log(error);
+    console.error("Delete service error:", error);
+
     res.status(500).send({
       message: "Failed to delete service",
     });
   }
 });
-// 
 
-// Update service status
+// PATCH: Update service status
+
 app.patch("/services/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
 
-    const allowedStatuses = ["pending", "approved", "rejected"];
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid service ID",
+      });
+    }
+
+    const allowedStatuses = [
+      "pending",
+      "approved",
+      "rejected",
+    ];
 
     if (!allowedStatuses.includes(status)) {
-      return res.status(400).send({ message: "Invalid service status" });
+      return res.status(400).send({
+        message: "Invalid service status",
+      });
     }
 
     const result = await services.updateOne(
-      { _id: new ObjectId(id) },
+      {
+        _id: new ObjectId(id),
+      },
       {
         $set: {
           status,
@@ -302,7 +419,9 @@ app.patch("/services/:id/status", async (req, res) => {
     );
 
     if (result.matchedCount === 0) {
-      return res.status(404).send({ message: "Service not found" });
+      return res.status(404).send({
+        message: "Service not found",
+      });
     }
 
     res.send({
@@ -310,13 +429,39 @@ app.patch("/services/:id/status", async (req, res) => {
       message: `Service ${status} successfully`,
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).send({ message: "Failed to update service status" });
+    console.error("Update service status error:", error);
+
+    res.status(500).send({
+      message: "Failed to update service status",
+    });
   }
 });
 
-// bookings
+// ========================================
+// 8. CUSTOMER BOOKING APIs
+// ========================================
 
+// GET: Get all bookings
+
+app.get("/bookings", async (req, res) => {
+  try {
+    const result = await bookings
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).send(result);
+  } catch (error) {
+    console.error("Get all bookings error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch all bookings",
+    });
+  }
+});
+
+// POST: Create booking
 
 app.post("/bookings", async (req, res) => {
   try {
@@ -328,6 +473,19 @@ app.post("/bookings", async (req, res) => {
       eventLocation,
       message,
     } = req.body;
+
+    if (!serviceId || !vendorId || !customerId) {
+      return res.status(400).send({
+        success: false,
+        message: "Required booking information is missing",
+      });
+    }
+
+    if (!ObjectId.isValid(serviceId)) {
+      return res.status(400).send({
+        message: "Invalid service ID",
+      });
+    }
 
     // Find service
     const service = await services.findOne({
@@ -341,24 +499,30 @@ app.post("/bookings", async (req, res) => {
     }
 
     // Prevent own service booking
-    if (service.vendorEmail?.toLowerCase() === customerId.toLowerCase()) {
+    if (
+      service.vendorEmail?.toLowerCase() ===
+      customerId.toLowerCase()
+    ) {
       return res.status(400).send({
         message: "You cannot book your own service!",
       });
     }
 
-    // Check if service is already booked on this date
+    // Check existing booking on same date
     const existingBooking = await bookings.findOne({
       serviceId,
       eventDate,
-      status: { $in: ["pending", "accepted"] },
+      status: {
+        $in: ["pending", "accepted"],
+      },
     });
 
-if (existingBooking) {
-  return res.status(400).send({
-    success: false,
-  });
-}
+    if (existingBooking) {
+      return res.status(400).send({
+        success: false,
+        message: "This service is already booked on this date",
+      });
+    }
 
     // Create booking
     const bookingData = {
@@ -374,14 +538,13 @@ if (existingBooking) {
 
     const result = await bookings.insertOne(bookingData);
 
-    res.send({
+    res.status(201).send({
       success: true,
       message: "Booking request submitted successfully!",
       insertedId: result.insertedId,
     });
-
   } catch (error) {
-    console.log(error);
+    console.error("Create booking error:", error);
 
     res.status(500).send({
       message: "Failed to create booking!",
@@ -389,11 +552,11 @@ if (existingBooking) {
   }
 });
 
-
+// GET: Get bookings for a customer
 
 app.get("/my-bookings/:customerId", async (req, res) => {
   try {
-    const customerId = req.params.customerId;
+    const { customerId } = req.params;
 
     const result = await bookings
       .find({ customerId })
@@ -415,21 +578,31 @@ app.get("/my-bookings/:customerId", async (req, res) => {
 
     res.send(bookingsWithService);
   } catch (error) {
+    console.error("My bookings error:", error);
+
     res.status(500).send({
       message: "Failed to fetch bookings",
     });
   }
 });
 
+// PATCH: Cancel booking
+
 app.patch("/bookings/:id/cancel", async (req, res) => {
   try {
-    const id = req.params.id;
+    const { id } = req.params;
     const { customerId } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid booking ID",
+      });
+    }
 
     const result = await bookings.updateOne(
       {
         _id: new ObjectId(id),
-        customerId: customerId,
+        customerId,
         status: "pending",
       },
       {
@@ -450,114 +623,137 @@ app.patch("/bookings/:id/cancel", async (req, res) => {
       message: "Booking cancelled successfully",
     });
   } catch (error) {
+    console.error("Cancel booking error:", error);
+
     res.status(500).send({
       message: "Failed to cancel booking",
     });
   }
 });
 
-// vendor apis
-// Get booking requests for a vendor
-app.get("/vendor-booking-requests/:vendorId", async (req, res) => {
-  try {
-    const vendorId = req.params.vendorId;
+// ========================================
+// 9. VENDOR BOOKING APIs
+// ========================================
 
-    const bookings = await database
-      .collection("bookings")
-      .find({ vendorId })
-      .sort({ createdAt: -1 })
-      .toArray();
+// GET: Get booking requests for a vendor
 
-    // Get service information for each booking
-    const bookingsWithService = await Promise.all(
-      bookings.map(async (booking) => {
-        const service = await database
-          .collection("services")
-          .findOne({
+app.get(
+  "/vendor-booking-requests/:vendorId",
+  async (req, res) => {
+    try {
+      const { vendorId } = req.params;
+
+      const vendorBookings = await bookings
+        .find({ vendorId })
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      const bookingsWithService = await Promise.all(
+        vendorBookings.map(async (booking) => {
+          const service = await services.findOne({
             _id: new ObjectId(booking.serviceId),
           });
 
-        return {
-          ...booking,
-          service: service
-            ? {
-                serviceName: service.serviceName,
-                image: service.image,
-                vendorName: service.vendorName,
-              }
-            : null,
-        };
-      })
-    );
+          return {
+            ...booking,
+            service: service
+              ? {
+                  serviceName: service.serviceName,
+                  image: service.image,
+                  vendorName: service.vendorName,
+                }
+              : null,
+          };
+        })
+      );
 
-    res.send(bookingsWithService);
-  } catch (error) {
-    res.status(500).send({
-      message: "Failed to get booking requests",
-    });
+      res.send(bookingsWithService);
+    } catch (error) {
+      console.error("Vendor booking requests error:", error);
+
+      res.status(500).send({
+        message: "Failed to get booking requests",
+      });
+    }
   }
-});
+);
 
+// PATCH: Accept or reject booking
 
-// Accept or Reject booking
 app.patch("/bookings/:id/status", async (req, res) => {
   try {
+    const { id } = req.params;
     const { vendorId, status } = req.body;
-    const bookingId = req.params.id;
 
-    // Only accept or reject
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid booking ID",
+      });
+    }
+
     if (!["accepted", "rejected"].includes(status)) {
       return res.status(400).send({
         message: "Invalid booking status",
       });
     }
 
-    const result = await database
-      .collection("bookings")
-      .updateOne(
-        {
-          _id: new ObjectId(bookingId),
-          vendorId: vendorId,
-          status: "pending",
+    const result = await bookings.updateOne(
+      {
+        _id: new ObjectId(id),
+        vendorId,
+        status: "pending",
+      },
+      {
+        $set: {
+          status,
         },
-        {
-          $set: { status: status },
-        }
-      );
+      }
+    );
 
     if (result.matchedCount === 0) {
       return res.status(400).send({
-        message:
-          "Booking not found, already processed, or unauthorized",
+        message: "Booking not found, already processed, or unauthorized",
       });
     }
 
     res.send({
+      success: true,
       message: `Booking ${status} successfully`,
     });
   } catch (error) {
+    console.error("Update booking status error:", error);
+
     res.status(500).send({
       message: "Failed to update booking",
     });
   }
 });
 
-// user block / unblock apis
+// ========================================
+// 10. USER BLOCK / UNBLOCK API
+// ========================================
 
 app.patch("/users/:id/block", async (req, res) => {
   try {
-    const id = req.params.id;
-    const isBlocked = req.body.isBlocked;
+    const { id } = req.params;
+    const { isBlocked } = req.body;
 
-    // Check if isBlocked is a boolean
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid user ID",
+      });
+    }
+
     if (typeof isBlocked !== "boolean") {
       return res.status(400).send({
         message: "Invalid user status",
       });
     }
 
-    // Find user
-    const user = await users.findOne({ id: id });
+    // Find user by MongoDB _id
+    const user = await users.findOne({
+      _id: new ObjectId(id),
+    });
 
     if (!user) {
       return res.status(404).send({
@@ -572,12 +768,13 @@ app.patch("/users/:id/block", async (req, res) => {
       });
     }
 
-    // Update user status
     await users.updateOne(
-      { id: id },
+      {
+        _id: new ObjectId(id),
+      },
       {
         $set: {
-          isBlocked: isBlocked,
+          isBlocked,
         },
       }
     );
@@ -588,9 +785,8 @@ app.patch("/users/:id/block", async (req, res) => {
         ? "User blocked successfully"
         : "User unblocked successfully",
     });
-
   } catch (error) {
-    console.log(error);
+    console.error("Block user error:", error);
 
     res.status(500).send({
       message: "Failed to update user status",
@@ -598,14 +794,66 @@ app.patch("/users/:id/block", async (req, res) => {
   }
 });
 
-// transactions
+// ========================================
+// 11. STRIPE TRANSACTION APIs
+// ========================================
+
+// GET: Get all transactions with vendor information
+
+app.get("/transactions", async (req, res) => {
+  try {
+    const allTransactions = await transactions
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const transactionsWithVendor = await Promise.all(
+      allTransactions.map(async (transaction) => {
+        let vendor = null;
+
+        if (ObjectId.isValid(transaction.vendorId)) {
+          vendor = await users.findOne({
+            _id: new ObjectId(transaction.vendorId),
+          });
+        }
+
+        return {
+          ...transaction,
+          vendor: vendor
+            ? {
+                name: vendor.name,
+                email: vendor.email,
+                businessName: vendor.businessName,
+                image: vendor.image,
+              }
+            : null,
+        };
+      })
+    );
+
+    res.status(200).send({
+      success: true,
+      transactions: transactionsWithVendor,
+    });
+  } catch (error) {
+    console.error("Get transactions error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch transactions",
+    });
+  }
+});
+
+// POST: Create Stripe Checkout Session
 
 app.post("/create-checkout-session", async (req, res) => {
   try {
-    // Temporary testing only. JWT authentication will be added later.
+    // Temporary testing only.
+    // In production, get vendorId from verified authentication.
+
     const { vendorId } = req.body;
 
-    // Validate vendor ID
     if (!vendorId) {
       return res.status(400).send({
         success: false,
@@ -613,11 +861,18 @@ app.post("/create-checkout-session", async (req, res) => {
       });
     }
 
+    if (!ObjectId.isValid(vendorId)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid vendor ID",
+      });
+    }
+
     // Find vendor
- const vendor = await users.findOne({
-  _id: new ObjectId(vendorId),
-  role: "vendor",
-});
+    const vendor = await users.findOne({
+      _id: new ObjectId(vendorId),
+      role: "vendor",
+    });
 
     if (!vendor) {
       return res.status(404).send({
@@ -634,7 +889,7 @@ app.post("/create-checkout-session", async (req, res) => {
       });
     }
 
-    // Get Stripe Price
+    // Retrieve Stripe Price
     const price = await stripe.prices.retrieve(
       process.env.STRIPE_PRICE_ID
     );
@@ -646,7 +901,7 @@ app.post("/create-checkout-session", async (req, res) => {
       });
     }
 
-    // Create Stripe Checkout Session
+    // Create Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
 
@@ -686,12 +941,11 @@ app.post("/create-checkout-session", async (req, res) => {
       createdAt: new Date(),
     });
 
-    // Send Checkout URL
+    // Send Checkout URL to frontend
     res.send({
       success: true,
       url: session.url,
     });
-
   } catch (error) {
     console.error("Stripe Checkout Error:", error);
 
@@ -702,11 +956,12 @@ app.post("/create-checkout-session", async (req, res) => {
   }
 });
 
+// ========================================
+// 12. SERVER
+// ========================================
 
-
-
-
-// server
 app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
+  console.log(`WedPlan server listening on port ${port}`);
 });
+
+export default app;
