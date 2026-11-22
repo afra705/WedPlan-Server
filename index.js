@@ -41,12 +41,9 @@ const bookings = database.collection("bookings");
 const transactions = database.collection("transactions");
 
 
-// ========================================
 // 3. JWT CONFIGURATION
-// ========================================
 
-// Better Auth JWT public key endpoint.
-// The frontend (CLIENT_URL) serves the JWKS through Next.js.
+
 const authBaseUrl =
   process.env.CLIENT_URL || process.env.BETTER_AUTH_URL;
 
