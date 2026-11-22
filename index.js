@@ -411,9 +411,12 @@ app.post(
     });
 
     try {
+      
       if (event.type === "checkout.session.completed") {
         const session = event.data.object;
 
+
+        
         webhookLog("Checkout session", {
           eventId: event.id,
           sessionId: session.id,
@@ -426,16 +429,20 @@ app.post(
         });
 
         // Only activate premium after successful payment
-        if (session.payment_status !== "paid") {
-          webhookLog("Skipped: payment not paid", {
-            eventId: event.id,
-            paymentStatus: session.payment_status,
-          });
+        if (
+  !["paid", "no_payment_required"].includes(
+    session.payment_status
+  )
+) {
+  webhookLog("Skipped: payment not completed", {
+    eventId: event.id,
+    paymentStatus: session.payment_status,
+  });
 
-          return res.status(200).send({
-            received: true,
-          });
-        }
+  return res.status(200).send({
+    received: true,
+  });
+}
 
         const transaction = await transactions.findOne({
           stripeSessionId: session.id,
@@ -449,16 +456,11 @@ app.post(
           session.client_reference_id ||
           transaction?.vendorId;
 
-        if (!vendorId) {
-          console.error(
-            "[stripe-webhook] No vendorId in session metadata, client_reference_id, or transaction:",
-            session.id
-          );
-
-          return res.status(200).send({
-            received: true,
-          });
-        }
+     if (!vendorId) {
+  throw new Error(
+    `Vendor ID missing for Stripe session: ${session.id}`
+  );
+}
 
         // Update Transaction
         if (transaction) {
@@ -1044,6 +1046,79 @@ app.patch(
     }
   }
 );
+
+
+// PATCH - Update Service Availability (Admin)
+
+app.patch(
+  "/services/:id/availability",
+  verifyToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { isActive } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid service ID",
+        });
+      }
+
+      if (typeof isActive !== "boolean") {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid availability status",
+        });
+      }
+
+      const service = await services.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!service) {
+        return res.status(404).send({
+          success: false,
+          message: "Service not found",
+        });
+      }
+
+      if (service.status !== "approved") {
+        return res.status(400).send({
+          success: false,
+          message: "Only approved services can change availability",
+        });
+      }
+
+      await services.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            isActive,
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      res.send({
+        success: true,
+        message: `Service ${isActive ? "activated" : "deactivated"} successfully`,
+        isActive,
+      });
+
+    } catch (error) {
+      console.error("Service Availability Error:", error);
+
+      res.status(500).send({
+        success: false,
+        message: "Failed to update service availability",
+      });
+    }
+  }
+);
+
+
 
 // ========================================
 // 12. CUSTOMER BOOKING APIs
@@ -1812,6 +1887,165 @@ app.post(
 // 18. SERVER
 // ========================================
 
+// 
+
+// GET: Current Subscription Status
+app.get(
+  "/subscription/status",
+  verifyToken,
+  verifyVendor,
+  async (req, res) => {
+    try {
+      const user = await users.findOne({
+        _id: req.user._id,
+      });
+
+      const premium = isPremiumActive(user);
+
+      res.send({
+        success: true,
+        subscriptionPlan: premium ? "premium" : "free",
+        subscriptionExpiresAt: user.subscriptionExpiresAt ?? null,
+        isPremium: premium,
+      });
+    } catch (error) {
+      console.error("Subscription Status Error:", error);
+
+      res.status(500).send({
+        message: "Failed to get subscription status",
+      });
+    }
+  }
+);
+
+// ========================================
+// PAYMENT CHECKOUT VERIFICATION
+// ========================================
+
+app.post(
+  "/payments/checkout-verify",
+  verifyToken,
+  verifyVendor,
+  async (req, res) => {
+    try {
+      const { sessionId } = req.body;
+      const vendorId = getUserId(req.user);
+
+      if (!sessionId) {
+        return res.status(400).send({
+          success: false,
+          message: "Session ID is required",
+        });
+      }
+
+      // Retrieve session directly from Stripe
+      const session = await stripe.checkout.sessions.retrieve(
+        sessionId
+      );
+
+      // Verify session owner
+      const sessionVendorId =
+        session.metadata?.vendorId ||
+        session.client_reference_id;
+
+      if (sessionVendorId !== vendorId) {
+        return res.status(403).send({
+          success: false,
+          message: "Unauthorized payment session",
+        });
+      }
+
+      // Verify payment
+      if (
+        session.status !== "complete" ||
+        !["paid", "no_payment_required"].includes(
+          session.payment_status
+        )
+      ) {
+        return res.status(400).send({
+          success: false,
+          message: "Payment is not completed",
+        });
+      }
+
+      if (
+        session.mode !== "subscription" ||
+        !session.subscription
+      ) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid subscription session",
+        });
+      }
+
+      // Find transaction
+      const transaction = await transactions.findOne({
+        stripeSessionId: session.id,
+        vendorId,
+      });
+
+      if (!transaction) {
+        return res.status(404).send({
+          success: false,
+          message: "Transaction not found",
+        });
+      }
+
+      // Retrieve subscription from Stripe
+      const subscription = await stripe.subscriptions.retrieve(
+        session.subscription
+      );
+
+      if (!["active", "trialing"].includes(subscription.status)) {
+        return res.status(400).send({
+          success: false,
+          message: "Subscription is not active",
+        });
+      }
+
+      // Activate premium
+      await activatePremium({
+        vendorId,
+        subscription,
+        context: {
+          sessionId: session.id,
+          source: "checkout-verify",
+        },
+      });
+
+      // Update transaction
+      await transactions.updateOne(
+        {
+          stripeSessionId: session.id,
+          vendorId,
+        },
+        {
+          $set: {
+            status: "paid",
+            stripeSubscriptionId: subscription.id,
+            paidAt: new Date(),
+          },
+        }
+      );
+
+      return res.send({
+        success: true,
+        message: "Payment verified successfully",
+        subscriptionPlan: "premium",
+        subscriptionExpiresAt:
+          getSubscriptionPeriodEnd(subscription),
+      });
+
+    } catch (error) {
+      console.error("Checkout Verification Error:", error);
+
+      return res.status(500).send({
+        success: false,
+        message: "Payment verification failed",
+      });
+    }
+  }
+);
 app.listen(port, () => {
   console.log(`WedPlan Server running on port ${port}`);
 });
