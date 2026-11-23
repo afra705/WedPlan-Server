@@ -655,6 +655,7 @@ app.get(
 // POST: Add Service
 // Vendor Only
 
+
 app.post(
   "/services",
   verifyToken,
@@ -671,56 +672,74 @@ app.post(
         images,
       } = req.body;
 
+      // Validate required fields
       if (
-        !serviceName ||
+        !serviceName?.trim() ||
         !category ||
-        !description ||
-        !location ||
+        !description?.trim() ||
+        !location?.trim() ||
         price === undefined
       ) {
         return res.status(400).send({
+          success: false,
           message: "All required fields must be provided",
         });
       }
 
-      if (!Number.isFinite(Number(price)) || Number(price) < 0) {
+      // Validate price
+      if (
+        !Number.isFinite(Number(price)) ||
+        Number(price) <= 0
+      ) {
         return res.status(400).send({
+          success: false,
           message: "Invalid service price",
         });
       }
 
       // Check Free Plan Limit
-      const activeServices = await services.countDocuments({
+      const totalServices = await services.countDocuments({
         vendorId: getUserId(req.user),
-        status: "approved",
-        isActive: { $ne: false },
       });
 
       if (
         !isPremiumActive(req.user) &&
-        activeServices >= 3
+        totalServices >= 3
       ) {
         return res.status(403).send({
-          message: "Upgrade to Premium to publish more services",
+          success: false,
+          message:
+            "Free plan allows only 3 services. Upgrade to Premium!",
         });
       }
 
+      // Prepare Service Data
       const serviceData = {
         vendorId: getUserId(req.user),
         vendorName: req.user.name,
         vendorEmail: req.user.email,
-        serviceName,
+
+        serviceName: serviceName.trim(),
         category,
-        description,
+        description: description.trim(),
         price: Number(price),
-        location,
+        location: location.trim(),
+
         image: image || "",
-        images: images || (image ? [image] : []),
+        images: Array.isArray(images)
+          ? images
+          : image
+            ? [image]
+            : [],
+
         status: "pending",
         isActive: true,
+
         createdAt: new Date(),
+        updatedAt: new Date(),
       };
 
+      // Save Service
       const result = await services.insertOne(serviceData);
 
       res.status(201).send({
@@ -733,11 +752,13 @@ app.post(
       console.error("Add Service Error:", error);
 
       res.status(500).send({
+        success: false,
         message: "Failed to add service",
       });
     }
   }
 );
+
 
 // GET: All Approved Services
 // Public API
